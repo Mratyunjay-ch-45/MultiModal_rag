@@ -104,7 +104,7 @@ def main():
 
     # Create a retriever and QA chain
     retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-    llm = ChatGoogleGenerativeAI(model="gemini-pro",  temperature=0.3)
+    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash",  temperature=0.3)
     qa_chain = RetrievalQA.from_chain_type(llm, retriever=retriever)
 
     # User query
