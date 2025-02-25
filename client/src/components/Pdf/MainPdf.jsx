@@ -1,8 +1,7 @@
-import React, { useState, lazy, Suspense } from 'react';
+import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Worker } from '@react-pdf-viewer/core';
-import { Viewer } from '@react-pdf-viewer/core';
-import { highlightPlugin } from '@react-pdf-viewer/highlight';
+import { Worker, Viewer } from '@react-pdf-viewer/core';
+import { highlightPlugin, Trigger } from '@react-pdf-viewer/highlight';
 import '@react-pdf-viewer/core/lib/styles/index.css';
 import '@react-pdf-viewer/highlight/lib/styles/index.css';
 
@@ -16,11 +15,30 @@ const MainPdf = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [highlights, setHighlights] = useState([]);
 
-  // Initialize the highlight plugin
-  const highlightPluginInstance = highlightPlugin();
-  const { jumpToHighlightArea } = highlightPluginInstance;
+  const highlightPluginInstance = highlightPlugin({
+    trigger: Trigger.None,
+    renderHighlights: (props) => (
+      <div>
+        {highlights
+          .filter((highlight) => highlight.pageIndex === props.pageIndex)
+          .map((highlight, index) => (
+            <div
+              key={index}
+              style={{
+                background: 'yellow',
+                opacity: 0.4,
+                position: 'absolute',
+                left: `${highlight.left}%`,
+                top: `${highlight.top}%`,
+                width: `${highlight.width}%`,
+                height: `${highlight.height}%`,
+              }}
+            />
+          ))}
+      </div>
+    ),
+  });
 
-  // Handle file selection
   const handleFileChange = (e) => {
     const selectedFile = e.target.files[0];
     if (selectedFile) {
@@ -32,7 +50,6 @@ const MainPdf = () => {
     }
   };
 
-  // Upload the selected PDF to the backend
   const handleUpload = async () => {
     if (!file) {
       alert('Please select a PDF file first.');
@@ -47,8 +64,6 @@ const MainPdf = () => {
       const res = await axios.post('http://localhost:8000/upload', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
-
-      console.log('Upload response:', res.data);
 
       if (res.data.file_id) {
         setFileId(res.data.file_id);
@@ -65,7 +80,6 @@ const MainPdf = () => {
     }
   };
 
-  // Submit a query to the backend
   const handleQuery = async () => {
     if (!query.trim()) {
       alert('Please enter a query.');
@@ -87,23 +101,17 @@ const MainPdf = () => {
 
       setResponse(res.data);
 
-      // Map relevant documents to highlights
+      // Create highlights from the relevant documents
       const newHighlights = res.data.relevant_docs.map((doc) => ({
-        pageIndex: doc.page - 1, // Page index starts at 0
+        pageIndex: doc.page - 1, // Assuming page numbers start at 1
+        left: 10, // These values are placeholders. You'll need to calculate actual positions
+        top: 10,
+        width: 80,
+        height: 5,
         content: doc.preview,
-        highlightAreas: [
-          // You need to calculate these bounding boxes based on your PDF content.
-          // For now, we'll assume some placeholder values.
-          { top: 10, left: 10, height: 20, width: 200 },
-        ],
       }));
 
       setHighlights(newHighlights);
-
-      // Jump to the first highlight automatically
-      if (newHighlights.length > 0) {
-        jumpToHighlightArea(newHighlights[0].pageIndex, newHighlights[0].highlightAreas[0]);
-      }
     } catch (error) {
       console.error('Query error:', error.response?.data || error.message);
       alert(error.response?.data?.detail || 'Error querying PDF.');
@@ -116,7 +124,6 @@ const MainPdf = () => {
     <div className="App">
       <h1>AI PDF Query System</h1>
 
-      {/* File Upload Section */}
       <div className="upload-section">
         <input type="file" accept="application/pdf" onChange={handleFileChange} />
         <button onClick={handleUpload} disabled={isLoading || !file}>
@@ -125,7 +132,6 @@ const MainPdf = () => {
         {isUploaded && <span>File uploaded successfully!</span>}
       </div>
 
-      {/* Query Submission Section */}
       <div className="query-section">
         <input
           type="text"
@@ -138,7 +144,6 @@ const MainPdf = () => {
         </button>
       </div>
 
-      {/* AI Response Section */}
       {response && (
         <div className="response-section">
           <h2>AI Answer:</h2>
@@ -152,20 +157,15 @@ const MainPdf = () => {
         </div>
       )}
 
-      {/* PDF Preview Section */}
       {pdfUrl && (
-        <div className="pdf-viewer-section" style={{ height: '100vh' }}>
+        <div className="pdf-viewer-section" style={{ height: '80vh', width: '100%' }}>
           <h2>PDF Preview</h2>
-          <Suspense fallback={<div>Loading PDF Viewer...</div>}>
-            <Worker workerUrl="https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js">
-              <Viewer
-                fileUrl={pdfUrl}
-                plugins={[
-                  highlightPluginInstance,
-                ]}
-              />
-            </Worker>
-          </Suspense>
+          <Worker workerUrl="https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js">
+            <Viewer
+              fileUrl={pdfUrl}
+              plugins={[highlightPluginInstance]}
+            />
+          </Worker>
         </div>
       )}
     </div>

@@ -11,6 +11,7 @@ from langchain_community.vectorstores.utils import filter_complex_metadata
 from langchain.chains import RetrievalQA
 from fastapi.middleware.cors import CORSMiddleware
 import uuid
+import fitz  # PyMuPDF
 
 app = FastAPI()
 
@@ -25,7 +26,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 UPLOAD_FOLDER = "uploads"
 CHROMA_DB_DIR = "./chroma_db"
@@ -46,14 +46,40 @@ class QueryRequest(BaseModel):
     file_id: str
     query: str
 
+class HighlightArea(BaseModel):
+    pageIndex: int
+    left: float
+    top: float
+    width: float
+    height: float
+
 class RelevantDocument(BaseModel):
     source: str
     page: int
     preview: str
+    highlight_areas: List[HighlightArea]
 
 class QueryResponse(BaseModel):
     answer: str
     relevant_docs: List[RelevantDocument]
+
+def get_text_positions(file_path: str, text: str, page_number: int):
+    doc = fitz.open(file_path)
+    page = doc[page_number - 1]  # PyMuPDF uses 0-based page numbers
+    text_instances = page.search_for(text)
+    
+    highlight_areas = []
+    for inst in text_instances:
+        highlight_areas.append(HighlightArea(
+            pageIndex=page_number - 1,
+            left=inst.x0 / page.rect.width * 100,
+            top=inst.y0 / page.rect.height * 100,
+            width=(inst.x1 - inst.x0) / page.rect.width * 100,
+            height=(inst.y1 - inst.y0) / page.rect.height * 100
+        ))
+    
+    doc.close()
+    return highlight_areas
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
@@ -85,7 +111,7 @@ async def query(request: QueryRequest):
     try:
         text_embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=GOOGLE_API_KEY)
         vectorstore = Chroma(persist_directory=f"./chroma_db_{request.file_id}", embedding_function=text_embeddings)
-        retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
         llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3)
         qa_chain = RetrievalQA.from_chain_type(llm, retriever=retriever)
         
@@ -98,7 +124,8 @@ async def query(request: QueryRequest):
                 RelevantDocument(
                     source=doc.metadata.get('source', 'Unknown'),
                     page=doc.metadata.get('page', 'Unknown'),
-                    preview=doc.page_content[:200]
+                    preview=doc.page_content[:200],
+                    highlight_areas=get_text_positions(file_path, doc.page_content[:200], doc.metadata.get('page', 1))
                 )
                 for doc in relevant_docs
             ]
