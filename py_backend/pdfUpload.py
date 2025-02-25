@@ -9,6 +9,8 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from langchain.chains import RetrievalQA
 from langchain.schema import Document
+from langchain.embeddings.base import Embeddings
+from langchain_community.vectorstores.utils import filter_complex_metadata
 import pymupdf4llm
 import re
 from typing import List, Dict
@@ -18,6 +20,24 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
 clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+
+class CombinedEmbeddings(Embeddings):
+    def __init__(self, text_embeddings, documents):
+        self.text_embeddings = text_embeddings
+        self.documents = documents
+
+    def embed_documents(self, texts):
+        return [self.embed_query(text) for text in texts]
+
+    def embed_query(self, text):
+        text_embedding = self.text_embeddings.embed_query(text)
+        doc = next((doc for doc in self.documents if doc.page_content == text), None)
+        if doc:
+            image_embeddings = doc.metadata.get("image_embeddings", [])
+            if image_embeddings:
+                combined = text_embedding + sum(image_embeddings, [])
+                return combined
+        return text_embedding
 
 def extract_pdf_content(file_path: str) -> List[Dict]:
     try:
@@ -58,11 +78,6 @@ def split_text_into_chunks(text, chunk_size=1000, chunk_overlap=200):
     )
     return text_splitter.split_text(text)
 
-def get_text_embedding(text_chunks):
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=GOOGLE_API_KEY)
-    print("Embedding text chunks...")
-    return [embeddings.embed_query(chunk) for chunk in text_chunks]
-
 def decode_base64_image(b64_string):
     image_data = base64.b64decode(b64_string)
     return Image.open(BytesIO(image_data)).convert("RGB")
@@ -80,31 +95,45 @@ def get_image_embedding(image: Image.Image):
 def create_documents(pdf_content):
     documents = []
     for page in pdf_content:
+        text_content = page['content']
+        image_embeddings = []
+        for image_b64 in page['images']:
+            image = decode_base64_image(image_b64)
+            image_embedding = get_image_embedding(image)
+            if image_embedding is not None:
+                image_embeddings.append(image_embedding.flatten().tolist())
+        
         doc = Document(
-            page_content=page['content'],
-            metadata={"page": page['page_number'], "source": "PDF"}
+            page_content=text_content,
+            metadata={
+                "page": page['page_number'],
+                "source": "PDF",
+                "image_embeddings": image_embeddings
+            }
         )
         documents.append(doc)
-    return documents    
-
+    return documents
 
 def main():
     file_path = "input.pdf"
     pdf_content = extract_pdf_content(file_path)
 
-    # Process text
+    # Process text and images
     documents = create_documents(pdf_content)
 
     # Initialize embeddings and Chroma DB
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=GOOGLE_API_KEY)
-    vectorstore = Chroma(persist_directory="./chroma_db", embedding_function=embeddings)
+    text_embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=GOOGLE_API_KEY)
+    combined_embeddings = CombinedEmbeddings(text_embeddings, documents)
 
-    # Add documents to Chroma DB
-    vectorstore.add_documents(documents)
+    # Filter complex metadata
+    filtered_documents = filter_complex_metadata(documents)
+
+    # Create Chroma vectorstore with filtered documents
+    vectorstore = Chroma.from_documents(filtered_documents, combined_embeddings, persist_directory="./chroma_db")
 
     # Create a retriever and QA chain
     retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash",  temperature=0.3)
+    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3)
     qa_chain = RetrievalQA.from_chain_type(llm, retriever=retriever)
 
     # User query

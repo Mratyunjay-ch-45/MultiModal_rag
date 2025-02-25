@@ -8,6 +8,8 @@ from langchain_community.vectorstores import Chroma
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain.chains import RetrievalQA
 from fastapi.middleware.cors import CORSMiddleware
+import pdfUpload as pd
+
 
 # Create the FastAPI app
 app = FastAPI()
@@ -41,7 +43,8 @@ async def upload_pdf(file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, buffer)
 
     try:
-        pdf_content = to_markdown(file_path, page_chunks=True)
+        pdf_content = pd.extract_pdf_content(file_path)
+        documents = pd.create_documents(pdf_content)
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Error processing PDF: {str(e)}"})
 
