@@ -1,4 +1,3 @@
-import pymupdf4llm
 import os
 import base64
 from io import BytesIO
@@ -7,23 +6,48 @@ import torch
 from transformers import CLIPProcessor, CLIPModel
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import Chroma
+from langchain.chains import RetrievalQA
+from langchain.schema import Document
+import pymupdf4llm
 import re
+from typing import List, Dict
+import concurrent.futures
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
 clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
 
-def extract_pdf_content(file_path):
+def extract_pdf_content(file_path: str) -> List[Dict]:
+    try:
+        pdf_content = pymupdf4llm.to_markdown(
+            file_path,
+            page_chunks=True,
+            write_images=True,
+            embed_images=True
+        )
+        
+        def process_page(page_data):
+            return {
+                'page_number': page_data['metadata']['page'],
+                'content': page_data['text'],
+                'images': extract_image_b64(page_data['text'])
+            }
+        
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            processed_content = list(executor.map(process_page, pdf_content))
+        
+        print(f"Extracted content from PDF file. {len(processed_content)} pages")
+        return processed_content
     
-    pdf_content = pymupdf4llm.to_markdown(
-        file_path,
-        page_chunks=True,
-        write_images=True,
-        embed_images=True
-    )
-    
-    return pdf_content
+    except Exception as e:
+        print(f"An error occurred while processing the PDF: {str(e)}")
+        return []
+
+def extract_image_b64(content: str) -> List[str]:
+    image_pattern = r"data:image\/[a-zA-Z]+;base64,([^`\s]+)"
+    return re.findall(image_pattern, content)
 
 def split_text_into_chunks(text, chunk_size=1000, chunk_overlap=200):
     text_splitter = RecursiveCharacterTextSplitter(
@@ -32,131 +56,74 @@ def split_text_into_chunks(text, chunk_size=1000, chunk_overlap=200):
         length_function=len,
         is_separator_regex=False,
     )
-    
-    chunks = text_splitter.split_text(text)
-    return chunks
+    return text_splitter.split_text(text)
 
 def get_text_embedding(text_chunks):
     embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=GOOGLE_API_KEY)
-    print("Embedding text chunks done...")
-    return [embeddings.embed_query(chunk) for chunk in text_chunks]    
-
-
-def extract_text(markdown_content):
-    
-    texts = []
-    if isinstance(markdown_content, list):
-        for item in markdown_content:
-            if isinstance(item, dict):
-                
-                if "text" in item and isinstance(item["text"], str):
-                    texts.append(item["text"])
-                elif "content" in item and isinstance(item["content"], str):
-                    texts.append(item["content"])
-                else:
-                    
-                    texts.append(str(item))
-            elif isinstance(item, str):
-                texts.append(item)
-    elif isinstance(markdown_content, str):
-        texts = [markdown_content]
-    else:
-        raise ValueError("Unsupported type for markdown_content")
-    
-    
-    combined_text = "\n".join(texts)
-    
-    
-    text_only = re.sub(r"!\[.*?\]\(data:image\/[a-zA-Z]+;base64,[^`\s]+\)", "", combined_text)
-    
-    return text_only
-
-
-
-def extract_image_b64(markdown_content):
-   
-    image_b64_list = []
-    image_pattern = r"data:image\/[a-zA-Z]+;base64,([^`\s]+)"
-    
-    
-    if isinstance(markdown_content, list):
-        for item in markdown_content:
-            
-            if isinstance(item, dict):
-                
-                for key in ["text", "content"]:
-                    if key in item and isinstance(item[key], str):
-                        found = re.findall(image_pattern, item[key])
-                        image_b64_list.extend(found)
-            elif isinstance(item, str):
-                found = re.findall(image_pattern, item)
-                image_b64_list.extend(found)
-    
-    
-    elif isinstance(markdown_content, dict):
-        for key, value in markdown_content.items():
-            if isinstance(value, str):
-                found = re.findall(image_pattern, value)
-                image_b64_list.extend(found)
-            elif isinstance(value, list):
-                
-                for sub_item in value:
-                    if isinstance(sub_item, str):
-                        found = re.findall(image_pattern, sub_item)
-                        image_b64_list.extend(found)
-                    elif isinstance(sub_item, dict):
-                        for sub_key in ["text", "content"]:
-                            if sub_key in sub_item and isinstance(sub_item[sub_key], str):
-                                found = re.findall(image_pattern, sub_item[sub_key])
-                                image_b64_list.extend(found)
-    
-    else:
-        
-        if isinstance(markdown_content, str):
-            found = re.findall(image_pattern, markdown_content)
-            image_b64_list.extend(found)
-    
-    # print("Extracted Base64 images:", image_b64_list)
-    return image_b64_list
+    print("Embedding text chunks...")
+    return [embeddings.embed_query(chunk) for chunk in text_chunks]
 
 def decode_base64_image(b64_string):
-    
     image_data = base64.b64decode(b64_string)
-    image = Image.open(BytesIO(image_data)).convert("RGB")
-    return image
+    return Image.open(BytesIO(image_data)).convert("RGB")
 
 def get_image_embedding(image: Image.Image):
-    
-    inputs = clip_processor(images=image, return_tensors="pt")
-    outputs = clip_model.get_image_features(**inputs)
-    
-    normalized_embedding = outputs / outputs.norm(p=2, dim=-1, keepdim=True)
-    return normalized_embedding.detach().cpu().numpy()
-
-
-file_path = "input.pdf"
-markdown_content = extract_pdf_content(file_path)
-image_b64_list = extract_image_b64(markdown_content)
-extract_text= extract_text(markdown_content)
-if extract_text:
-    print("Extracted Text",extract_text)
-else:
-    print("No text found in the PDF file.")
-text_chunks = split_text_into_chunks(extract_text)
-text_embeddings = get_text_embedding(text_chunks)
-print("Generated embeddings for", len(text_embeddings), "text chunks.")        
-
-
-image_embeddings = []
-for b64_str in image_b64_list:
     try:
-        image = decode_base64_image(b64_str)
-        embedding = get_image_embedding(image)
-        image_embeddings.append(embedding)
-        
+        inputs = clip_processor(images=image, return_tensors="pt")
+        outputs = clip_model.get_image_features(**inputs)
+        normalized_embedding = outputs / outputs.norm(p=2, dim=-1, keepdim=True)
+        return normalized_embedding.detach().cpu().numpy()
     except Exception as e:
-        print("Error processing an image:", e)
+        print(f"Error processing an image: {e}")
+        return None
 
-# print(image_embeddings)
+def create_documents(pdf_content):
+    documents = []
+    for page in pdf_content:
+        doc = Document(
+            page_content=page['content'],
+            metadata={"page": page['page_number'], "source": "PDF"}
+        )
+        documents.append(doc)
+    return documents    
 
-print("Generated embeddings for", len(image_embeddings), "images.")
+
+def main():
+    file_path = "input.pdf"
+    pdf_content = extract_pdf_content(file_path)
+
+    # Process text
+    documents = create_documents(pdf_content)
+
+    # Initialize embeddings and Chroma DB
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=GOOGLE_API_KEY)
+    vectorstore = Chroma(persist_directory="./chroma_db", embedding_function=embeddings)
+
+    # Add documents to Chroma DB
+    vectorstore.add_documents(documents)
+
+    # Create a retriever and QA chain
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+    llm = ChatGoogleGenerativeAI(model="gemini-pro",  temperature=0.3)
+    qa_chain = RetrievalQA.from_chain_type(llm, retriever=retriever)
+
+    # User query
+    query = input("Enter your query: ")
+    result = qa_chain({"query": query})
+
+    # Get relevant documents
+    relevant_docs = retriever.get_relevant_documents(query)
+
+    # Preview the pages from where relevant documents are fetched
+    print("\nRelevant Documents:")
+    for i, doc in enumerate(relevant_docs):
+        print(f"Document {i + 1}:")
+        print(f"Source: {doc.metadata.get('source', 'Unknown')}")
+        print(f"Page: {doc.metadata.get('page', 'Unknown')}")
+        print(f"Preview: {doc.page_content[:200]}...")
+        print()
+
+    print("Answer:", result["result"])
+
+if __name__ == "__main__":
+    main()
