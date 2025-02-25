@@ -1,92 +1,111 @@
 import os
 import shutil
-from fastapi import FastAPI, File, UploadFile, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.responses import JSONResponse
-from pymupdf4llm import to_markdown
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma
+from pydantic import BaseModel
+from typing import List
+from pdfUpload import extract_pdf_content, create_documents, CombinedEmbeddings
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
+from langchain_community.vectorstores import Chroma
+from langchain_community.vectorstores.utils import filter_complex_metadata
 from langchain.chains import RetrievalQA
 from fastapi.middleware.cors import CORSMiddleware
-import pdfUpload as pd
+import uuid
 
-
-# Create the FastAPI app
 app = FastAPI()
 
 origins = [
-    "http://localhost:5173",  # Your frontend URL
-    # Add any other origins you need to allow
+    "http://localhost:5173",  
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,        # Allows requests from these origins
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Create directories if they don't exist
-UPLOAD_DIR = "uploads"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# Initialize embeddings and Chroma vector store
+UPLOAD_FOLDER = "uploads"
+CHROMA_DB_DIR = "./chroma_db"
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=GOOGLE_API_KEY)
-vectorstore = Chroma(persist_directory="./chroma_db", embedding_function=embeddings)
 
-@app.post("/upload/")
-async def upload_pdf(file: UploadFile = File(...)):
-    file_path = os.path.join(UPLOAD_DIR, file.filename)
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
+
+text_embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=GOOGLE_API_KEY)
+llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3)
+
+documents = []
+vectorstore = None
+retriever = None
+qa_chain = None
+
+class QueryRequest(BaseModel):
+    file_id: str
+    query: str
+
+class RelevantDocument(BaseModel):
+    source: str
+    page: int
+    preview: str
+
+class QueryResponse(BaseModel):
+    answer: str
+    relevant_docs: List[RelevantDocument]
+
+@app.post("/upload")
+async def upload_file(file: UploadFile = File(...)):
+    file_id = str(uuid.uuid4())
+    file_path = os.path.join(UPLOAD_FOLDER, f"{file_id}.pdf")  
+    
     with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
+        buffer.write(await file.read())
+    
     try:
-        pdf_content = pd.extract_pdf_content(file_path)
-        documents = pd.create_documents(pdf_content)
+        pdf_content = extract_pdf_content(file_path)
+        documents = create_documents(pdf_content)
+        text_embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=GOOGLE_API_KEY)
+        combined_embeddings = CombinedEmbeddings(text_embeddings, documents)
+        filtered_documents = filter_complex_metadata(documents)
+        Chroma.from_documents(filtered_documents, combined_embeddings, persist_directory=f"./chroma_db_{file_id}")
+        return {"file_id": file_id}
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": f"Error processing PDF: {str(e)}"})
+        os.remove(file_path)
+        raise HTTPException(status_code=500, detail=str(e))
 
-    documents = []
-    for page_data in pdf_content:
-        page_number = page_data.get('metadata', {}).get('page', None)
-        content = page_data.get('text', '')
-        if page_number is None:
-            continue
-        documents.append({
-            "text": content,
-            "metadata": {"page": page_number, "source": file.filename}
-        })
-
-    # Add the documents to the vector store
+@app.post("/query", response_model=QueryResponse)
+async def query(request: QueryRequest):
+    file_path = os.path.join(UPLOAD_FOLDER, f"{request.file_id}.pdf") 
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    
     try:
-        vectorstore.add_documents(documents)
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": f"Error adding documents: {str(e)}"})
-
-    return {"message": "PDF uploaded and processed", "filename": file.filename}
-
-@app.post("/query")
-async def query_pdf(query: str = Form(...)):
-    try:
+        text_embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=GOOGLE_API_KEY)
+        vectorstore = Chroma(persist_directory=f"./chroma_db_{request.file_id}", embedding_function=text_embeddings)
         retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
         llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3)
         qa_chain = RetrievalQA.from_chain_type(llm, retriever=retriever)
-        result = qa_chain({"query": query})
-        relevant_docs = retriever.get_relevant_documents(query)
+        
+        result = qa_chain({"query": request.query})
+        relevant_docs = retriever.get_relevant_documents(request.query)
+        
+        return QueryResponse(
+            answer=result["result"],
+            relevant_docs=[
+                RelevantDocument(
+                    source=doc.metadata.get('source', 'Unknown'),
+                    page=doc.metadata.get('page', 'Unknown'),
+                    preview=doc.page_content[:200]
+                )
+                for doc in relevant_docs
+            ]
+        )
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": f"Query failed: {str(e)}"})
+        raise HTTPException(status_code=500, detail=str(e))
 
-    response = {
-        "answer": result.get("result", ""),
-        "documents": [
-            {"page": doc.metadata.get("page"), "content": doc.page_content} for doc in relevant_docs
-        ]
-    }
-    return JSONResponse(content=response)
-
-# A simple root endpoint to test the server
-@app.get("/")
-def read_root():
-    return {"message": "FastAPI server is running"}
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

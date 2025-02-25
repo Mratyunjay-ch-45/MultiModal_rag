@@ -118,32 +118,32 @@ def main():
     file_path = "input.pdf"
     pdf_content = extract_pdf_content(file_path)
 
-    # Process text and images
+
     documents = create_documents(pdf_content)
 
-    # Initialize embeddings and Chroma DB
+
     text_embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=GOOGLE_API_KEY)
     combined_embeddings = CombinedEmbeddings(text_embeddings, documents)
 
-    # Filter complex metadata
+
     filtered_documents = filter_complex_metadata(documents)
 
-    # Create Chroma vectorstore with filtered documents
+ 
     vectorstore = Chroma.from_documents(filtered_documents, combined_embeddings, persist_directory="./chroma_db")
 
-    # Create a retriever and QA chain
+   
     retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
     llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3)
     qa_chain = RetrievalQA.from_chain_type(llm, retriever=retriever)
 
-    # User query
+
     query = input("Enter your query: ")
     result = qa_chain({"query": query})
 
-    # Get relevant documents
+ 
     relevant_docs = retriever.get_relevant_documents(query)
 
-    # Preview the pages from where relevant documents are fetched
+  
     print("\nRelevant Documents:")
     for i, doc in enumerate(relevant_docs):
         print(f"Document {i + 1}:")
