@@ -65,7 +65,7 @@ class QueryResponse(BaseModel):
 
 def get_text_positions(file_path: str, text: str, page_number: int):
     doc = fitz.open(file_path)
-    page = doc[page_number - 1]  # PyMuPDF uses 0-based page numbers
+    page = doc[page_number - 1] 
     text_instances = page.search_for(text)
     
     highlight_areas = []
